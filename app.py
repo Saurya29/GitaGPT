@@ -1,515 +1,907 @@
-# --- IMPORTANT: SQLite3 Fix for Chroma on Streamlit Cloud ---
-# These lines must be at the very top of your script, before any other imports
-# that might implicitly try to import sqlite3 (like langchain_chroma)
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-# --- END SQLite3 Fix ---
-
-import streamlit as st
 import os
 import base64
+import streamlit as st
 from dotenv import load_dotenv
-from langchain_community.vectorstores import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
+
+from langchain_groq import ChatGroq
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 from langchain.chains import RetrievalQA
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from fpdf import FPDF
-# Import XPos and YPos for fpdf2 deprecation fixes
-from fpdf.enums import XPos, YPos 
-import time # For streaming effect
-import asyncio # Import asyncio for event loop management
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# ------------------- Load API Key -------------------
+from fpdf import FPDF, XPos, YPos
+
+# --------------------------------------------------
+# LOAD API KEY
+# --------------------------------------------------
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not GOOGLE_API_KEY:
-    st.error("🚨 Google API Key not found! Please set the GOOGLE_API_KEY environment variable in your `.env` file.")
-    st.stop() # Stop the app if API key is missing
-
-# ------------------- Configure Streamlit Page -------------------
+# --------------------------------------------------
+# PAGE CONFIG  —  no sidebar
+# --------------------------------------------------
 st.set_page_config(
-    page_title="Gita GPT - Your Spiritual Companion",
+    page_title="GitaGPT — Ask Lord Krishna Anything",
     page_icon="🕉️",
     layout="centered",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed",
 )
 
-# ------------------- Custom CSS for Devotional Look and Feel with New Effects -------------------
-def set_custom_css(background_b64):
-    st.markdown(
-        f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600&family=Playfair+Display:wght=700&display=swap');
+# --------------------------------------------------
+# LOAD KRISHNA IMAGE
+# --------------------------------------------------
+krishna_b64 = None
+try:
+    with open("krishna_ji.jpeg", "rb") as f:
+        krishna_b64 = base64.b64encode(f.read()).decode()
+except:
+    pass
 
-        /* Overall Page Styling */
-        .stApp {{
-            background: url("data:image/jpeg;base64,{background_b64}") center center fixed;
-            background-size: cover;
-            color: #E0E0E0; /* Lighter text for dark background */
-            font-family: 'Open Sans', sans-serif;
-            overflow-x: hidden; /* Prevent horizontal scroll */
-            padding-top: 2rem; /* Add some top padding */
-        }}
+# --------------------------------------------------
+# CSS
+# --------------------------------------------------
+def set_css(krishna_b64=None):
 
-        /* Central Container for content */
-        .main-content-container {{
-            background: rgba(0, 0, 0, 0.4); /* Slightly dark, translucent overlay for readability */
-            border-radius: 25px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6); /* Stronger, deeper shadow */
-            padding: 3rem;
-            margin: 2rem auto;
-            max-width: 900px; /* Wider content area */
-            animation: fadeInScale 1s ease-out forwards;
-            border: 2px solid #7B1FA2; /* Divine purple border */
-        }}
-
-        @keyframes fadeInScale {{
-            from {{ opacity: 0; transform: scale(0.95) translateY(20px); }}
-            to {{ opacity: 1; transform: scale(1) translateY(0); }}
-        }}
-
-        /* Title and Header */
-        h1, h2, h3 {{
-            font-family: 'Playfair Display', serif; /* More elegant font for titles */
-            color: #FFD700; /* Gold for prominence */
-            text-align: center;
-            text-shadow: 0px 0px 15px rgba(255, 215, 0, 0.8), 0px 0px 8px rgba(0,0,0,0.5); /* Glowing effect */
-            margin-bottom: 1.5rem;
-            letter-spacing: 2px;
-            animation: textGlowGold 2s infinite alternate;
-        }}
-
-        @keyframes textGlowGold {{
-            from {{ text-shadow: 0px 0px 10px rgba(255, 215, 0, 0.7), 0px 0px 5px rgba(0,0,0,0.3); }}
-            to {{ text-shadow: 0px 0px 20px rgba(255, 215, 0, 1), 0px 0px 10px rgba(0,0,0,0.5); }}
-        }}
-        
-        /* Subheaders and descriptions */
-        .stMarkdown p, .stMarkdown h4 {{
-            color: #F8F8F8; /* Lighter color for better contrast */
-            text-align: center;
-            font-size: 1.1em;
-            margin-bottom: 1.5rem;
-        }}
-        .stMarkdown p:last-child {{
-            margin-bottom: 0;
-        }}
-
-
-        /* Streamlit components specific overrides */
-        .stTextInput>div>div>input, .stTextArea>div>div>textarea {{
-            background-color: rgba(255, 255, 255, 0.1); /* Subtle, dark background */
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            color: #E0E0E0; /* Lighter text color */
-            border-radius: 15px;
-            padding: 0.8rem 1rem;
-            transition: all 0.3s ease;
-            box-shadow: inset 0 1px 5px rgba(0,0,0,0.2);
-        }}
-        .stTextInput>div>div>input:focus, .stTextArea>div>div>textarea:focus {{
-            border-color: #FFD700; /* Gold focus glow */
-            box-shadow: 0 0 0 0.2rem rgba(255, 215, 0, 0.25), inset 0 1px 5px rgba(0,0,0,0.3);
-            outline: none;
-        }}
-        
-        .stButton>button {{
-            background: linear-gradient(135deg, #9C27B0, #7B1FA2); /* Gradient purple button */
-            color: white;
-            border-radius: 15px;
-            border: none;
-            padding: 0.7rem 1.8rem;
-            font-size: 1.1rem;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            box-shadow: 0px 6px 20px rgba(0,0,0,0.4); /* Deeper shadow */
-            margin: 0.5rem auto;
-            display: block;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            cursor: pointer;
-        }}
-        .stButton>button:hover {{
-            background: linear-gradient(135deg, #7B1FA2, #6A1B9A); /* Darker gradient on hover */
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0px 10px 25px rgba(0,0,0,0.5);
-        }}
-
-        /* Chat Bubbles */
-        /* Targets the actual content div within chat messages */
-        .st-emotion-cache-eczf16 > div {{ 
-            padding: 1rem 1.2rem;
-            margin-bottom: 1rem;
-            border-radius: 25px; 
-            max-width: 90%; 
-            box-shadow: 0px 4px 15px rgba(0,0,0,0.3); /* Clearer shadow */
-            animation: fadeIn 0.8s ease-out;
-            line-height: 1.6;
+    # Build the hero visual block — uses the image if available,
+    # falls back to a pure CSS gradient glow
+    if krishna_b64:
+        hero_visual = f"""
+        .krishna-visual {{
             position: relative;
-            overflow: hidden; 
-            /* Remove backdrop-filter to remove glass effect */
-        }}
-        /* No inner glow, instead a solid background for bubbles */
-        .st-emotion-cache-eczf16 > div::before {{
-            display: none; /* Hide the pseudo-element used for inner glow */
-        }}
-
-        /* Specific bubble colors based on role (Streamlit internal classes) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u .st-emotion-cache-eczf16 > div {{ /* User message bubble */
-            background-color: #4A148C; /* Deep purple for user */
-            color: #FFEBEE; /* Light text for user bubble */
-            border: 1px solid rgba(255, 255, 255, 0.2); 
-            margin-left: auto; 
-            border-bottom-right-radius: 8px; 
-            border-top-right-radius: 25px; 
-            border-bottom-left-radius: 25px; 
-            border-top-left-radius: 25px; 
-        }}
-
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 .st-emotion-cache-eczf16 > div {{ /* Assistant message bubble */
-            background-color: #1A237E; /* Deep blue for Krishna */
-            color: #E8EAF6; /* Lighter text for Krishna bubble */
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            margin-right: auto; 
-            border-bottom-left-radius: 8px; 
-            border-top-left-radius: 25px; 
-            border-bottom-right-radius: 25px;
-            border-top-right-radius: 25px;
-        }}
-        
-        /* Avatars (Streamlit chat elements) - Adjusting alignment to place message next to avatar */
-        .st-emotion-cache-1c7y2qn {{ /* Targets the overall chat message container */
-            display: flex;
-            align-items: flex-start; /* Align avatar and message to the top */
-            gap: 0.7rem; /* Space between avatar and message */
-            width: 100%; /* Ensure it takes full width */
-            margin-bottom: 0.5rem; /* Reduce space between chat entries */
-        }}
-
-        /* User message container (avatar on right, content on left of avatar) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u {{ 
-            flex-direction: row-reverse; 
-            justify-content: flex-start; 
-        }}
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-18jva2u .st-emotion-cache-eczf16 {{ /* User chat content wrapper */
-            margin-left: 0.5rem; 
-            flex-grow: 1; 
-            display: flex; 
-            justify-content: flex-end; 
-        }}
-
-        /* Assistant chat container (avatar on left, content on right of avatar) */
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 {{ 
-            flex-direction: row;
-            justify-content: flex-start;
-        }}
-        .st-emotion-cache-1c7y2qn.st-emotion-cache-h6n150 .st-emotion-cache-eczf16 {{ /* Assistant chat content wrapper */
-            margin-right: 0.5rem; 
-            flex-grow: 1; 
-            display: flex; 
-            justify-content: flex-start; 
-        }}
-
-        /* Intro Form */
-        .intro-container {{
-            background: rgba(20, 0, 40, 0.7); /* Darker, more solid background */
-            border: 2px solid #FFD700; /* Gold border */
-            border-radius: 30px; 
-            box-shadow: 0px 10px 40px rgba(0,0,0,0.6);
-            text-align: center;
-            max-width: 550px;
-            margin: 4rem auto; 
-            padding: 3rem;
-            animation: popIn 1s ease-out forwards; 
-        }}
-        .intro-container h3 {{
-            color: #FFD700; /* Gold for intro heading */
-            margin-bottom: 2rem;
-            font-size: 1.8rem; 
-            text-shadow: 0px 0px 8px rgba(255, 215, 0, 0.5);
-        }}
-        
-        /* Footer */
-        .footer {{
-            font-family: 'Open Sans', sans-serif;
-            font-size: 0.95rem;
-            color: #FFD700; /* Gold color for footer text */
-            text-align: center;
-            padding: 1.8rem;
-            margin-top: 4rem;
-            text-shadow: 1px 1px 4px rgba(0,0,0,0.3);
-            background: rgba(0, 0, 0, 0.5); /* Solid dark background for footer */
-            border-top: 1px solid rgba(255, 215, 0, 0.3); /* Subtle gold border top */
-            border-radius: 15px; /* Keep some rounding */
-        }}
-        
-        /* Sidebar Styling */
-        .st-emotion-cache-vk33gh {{ /* Target the sidebar container */
-            background: rgba(10, 0, 20, 0.8); /* Darker, more solid sidebar */
-            border-right: 1px solid rgba(255, 215, 0, 0.3);
-            box-shadow: 2px 0 15px rgba(0,0,0,0.4);
-        }}
-        .st-emotion-cache-vk33gh h2 {{
-            color: #FFD700; /* Gold sidebar header */
-            text-shadow: none;
-            text-align: left;
-            margin-bottom: 1rem;
-        }}
-        .st-emotion-cache-vk33gh .stButton>button {{
-            background: linear-gradient(135deg, #7B1FA2, #6A1B9A);
-            color: white;
-            box-shadow: none; 
-            display: inline-block; 
-            margin: 0.5rem 0;
             width: 100%;
+            max-width: 820px;
+            margin: 0 auto;
+            height: 520px;
+            overflow: hidden;
         }}
-        .st-emotion-cache-vk33gh .stButton>button:hover {{
-            background: linear-gradient(135deg, #6A1B9A, #4A148C);
-            transform: none;
+        /* The actual photo */
+        .krishna-visual::before {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: url("data:image/jpeg;base64,{krishna_b64}") center top / cover no-repeat;
+            mask-image: linear-gradient(
+                to bottom,
+                transparent 0%,
+                rgba(0,0,0,0.25) 15%,
+                rgba(0,0,0,0.92) 52%,
+                black 70%
+            );
+            -webkit-mask-image: linear-gradient(
+                to bottom,
+                transparent 0%,
+                rgba(0,0,0,0.25) 15%,
+                rgba(0,0,0,0.92) 52%,
+                black 70%
+            );
         }}
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+        /* Saffron aura glow behind Krishna */
+        .krishna-visual::after {{
+            content: "";
+            position: absolute;
+            top: 5%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 320px;
+            height: 320px;
+            border-radius: 50%;
+            background: radial-gradient(
+                circle,
+                rgba(255,140,50,0.22) 0%,
+                rgba(212,175,55,0.12) 40%,
+                transparent 70%
+            );
+            mix-blend-mode: screen;
+            animation: auraPulse 4s ease-in-out infinite;
+        }}
+        /* Floating particle dots */
+        .krishna-visual .particle {{
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(212,175,55,0.6);
+            animation: floatUp linear infinite;
+            pointer-events: none;
+        }}
+        """
+    else:
+        hero_visual = """
+        .krishna-visual {
+            position: relative;
+            width: 100%;
+            max-width: 820px;
+            margin: 0 auto;
+            height: 340px;
+            background: radial-gradient(ellipse at 50% 30%,
+                rgba(255,140,50,0.18) 0%,
+                rgba(212,175,55,0.08) 40%,
+                transparent 70%);
+        }
+        .krishna-visual::after { display: none; }
+        """
 
-# ------------------- Load LLM -------------------
-llm = ChatGoogleGenerativeAI(
-    model="models/gemini-1.5-flash",
-    google_api_key=GOOGLE_API_KEY,
+    st.markdown(f"""
+<style>
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap');
+
+/* ── VARIABLES ── */
+:root {{
+    --bg:           #070711;
+    --bg2:          #0d0d1a;
+    --surface:      #0f0f1c;
+    --surface2:     #161625;
+    --surface3:     #1c1c2e;
+    --border:       rgba(255,255,255,0.06);
+    --border-soft:  rgba(255,255,255,0.04);
+    --border-gold:  rgba(212,175,55,0.22);
+    --saffron:      #E8622A;
+    --saffron-l:    #FF7A45;
+    --saffron-dim:  rgba(232,98,42,0.10);
+    --saffron-glow: rgba(232,98,42,0.22);
+    --gold:         #C9A84C;
+    --gold-dim:     rgba(201,168,76,0.13);
+    --cream:        #EDE8DE;
+    --cream2:       #F5F0E8;
+    --muted:        rgba(237,232,222,0.38);
+    --muted2:       rgba(237,232,222,0.55);
+    --online:       #34D399;
+    --r:            14px;
+    --r-sm:         10px;
+}}
+
+/* ── RESET ── */
+html, body, .stApp {{
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(160deg, var(--bg) 0%, var(--bg2) 100%) !important;
+    color: var(--cream) !important;
+    -webkit-font-smoothing: antialiased;
+}}
+
+/* hide sidebar toggle & default chrome */
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"],
+#MainMenu, footer, header,
+.stDeployButton {{ display: none !important; }}
+
+.block-container {{
+    padding: 0 !important;
+    max-width: 820px !important;
+}}
+
+/* ══════════════════════════════════════
+   NAV BAR
+══════════════════════════════════════ */
+.topnav {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.95rem 2.2rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(7,7,17,0.97);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    position: sticky;
+    top: 0;
+    z-index: 200;
+}}
+.nav-logo {{
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--cream2);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}}
+.nav-logo em {{ color: var(--saffron-l); font-style: normal; }}
+.nav-links {{
+    display: flex;
+    gap: 2rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+}}
+.nav-links span {{
+    cursor: pointer;
+    transition: color 0.2s ease;
+    padding-bottom: 2px;
+    border-bottom: 1px solid transparent;
+}}
+.nav-links span:hover {{
+    color: var(--cream);
+    border-bottom-color: var(--saffron-l);
+}}
+
+/* ══════════════════════════════════════
+   KRISHNA VISUAL HERO
+══════════════════════════════════════ */
+{hero_visual}
+
+/* Text layer sits on top of the image */
+.hero-text {{
+    position: absolute;
+    bottom: 0;
+    left: 0; right: 0;
+    padding: 2.5rem 2.5rem 3rem;
+    text-align: center;
+    z-index: 10;
+    animation: heroFadeIn 1s ease both;
+}}
+.hero-eyebrow {{
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--saffron-l);
+    margin-bottom: 0.9rem;
+    display: block;
+    opacity: 0.9;
+}}
+.hero-title {{
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 3rem;
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.01em;
+    color: var(--cream2);
+    margin-bottom: 0.75rem;
+    text-shadow: 0 2px 32px rgba(0,0,0,0.7), 0 0 60px rgba(0,0,0,0.5);
+}}
+.hero-title .g {{
+    background: linear-gradient(110deg, var(--saffron-l) 0%, var(--gold) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}}
+.hero-sub {{
+    font-family: 'Crimson Pro', serif;
+    font-size: 1.12rem;
+    color: rgba(237,232,222,0.72);
+    max-width: 420px;
+    margin: 0 auto 1.6rem;
+    line-height: 1.7;
+    font-weight: 400;
+}}
+
+/* ══════════════════════════════════════
+   AVATAR STATUS BADGE
+══════════════════════════════════════ */
+.status-badge {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: rgba(7,7,17,0.82);
+    border: 1px solid rgba(201,168,76,0.28);
+    border-radius: 40px;
+    padding: 0.5rem 1.3rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--cream);
+    backdrop-filter: blur(12px);
+    letter-spacing: 0.02em;
+    box-shadow:
+        0 4px 24px rgba(0,0,0,0.5),
+        inset 0 1px 0 rgba(255,255,255,0.04);
+}}
+.dot-live {{
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--online);
+    box-shadow: 0 0 10px var(--online), 0 0 4px var(--online);
+    animation: blink 2.4s ease infinite;
+    flex-shrink: 0;
+}}
+
+/* ══════════════════════════════════════
+   STATS ROW
+══════════════════════════════════════ */
+.stats-row {{
+    display: flex;
+    justify-content: center;
+    gap: 1px;
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    overflow: hidden;
+    background: var(--border);
+    margin: 0 1.8rem;
+}}
+.stat {{
+    flex: 1;
+    padding: 1.1rem 0.5rem;
+    text-align: center;
+    background: var(--surface);
+    transition: background 0.2s ease;
+}}
+.stat:hover {{
+    background: var(--surface2);
+}}
+.stat-v {{
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--cream2);
+    display: block;
+    letter-spacing: -0.01em;
+}}
+.stat-l {{
+    font-size: 0.6rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-top: 0.2rem;
+    display: block;
+    font-weight: 500;
+}}
+
+/* ══════════════════════════════════════
+   INTRO FORM
+══════════════════════════════════════ */
+.form-shell {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: 1px solid rgba(255,255,255,0.05);
+    border-radius: var(--r);
+    padding: 2.2rem 2.4rem 2rem;
+    margin: 2rem 1.8rem 0;
+    box-shadow:
+        0 1px 0 rgba(255,255,255,0.03) inset,
+        0 20px 60px rgba(0,0,0,0.3);
+}}
+.form-title {{
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: var(--cream2);
+    margin-bottom: 0.3rem;
+    letter-spacing: 0.01em;
+}}
+.form-sub {{
+    font-family: 'Crimson Pro', serif;
+    font-size: 0.94rem;
+    color: var(--muted);
+    font-style: italic;
+    margin-bottom: 1.6rem;
+    line-height: 1.5;
+}}
+[data-testid="stForm"] {{
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+}}
+
+/* ══════════════════════════════════════
+   INPUTS
+══════════════════════════════════════ */
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input {{
+    background: var(--surface2) !important;
+    color: var(--cream2) !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    border-radius: 10px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.95rem !important;
+    padding: 0.65rem 1rem !important;
+    transition: border-color .2s, box-shadow .2s !important;
+}}
+.stTextInput > div > div > input:focus,
+.stNumberInput > div > div > input:focus {{
+    border-color: var(--saffron) !important;
+    box-shadow: 0 0 0 3px var(--saffron-dim) !important;
+}}
+.stTextInput label, .stNumberInput label {{
+    color: var(--muted2) !important;
+    font-size: 0.75rem !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.09em !important;
+}}
+
+/* ══════════════════════════════════════
+   BUTTONS
+══════════════════════════════════════ */
+.stButton > button {{
+    background: var(--saffron) !important;
+    color: #fff !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.88rem !important;
+    font-weight: 600 !important;
+    border: none !important;
+    border-radius: 10px !important;
+    padding: 0.65rem 1.8rem !important;
+    letter-spacing: 0.02em !important;
+    transition: all .22s ease !important;
+    box-shadow: 0 2px 20px var(--saffron-glow) !important;
+}}
+.stButton > button:hover {{
+    background: var(--saffron-l) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 28px var(--saffron-glow) !important;
+}}
+.stButton > button:active {{
+    transform: translateY(0) !important;
+}}
+
+/* ══════════════════════════════════════
+   CHAT AREA WRAPPER
+══════════════════════════════════════ */
+.chat-wrap {{
+    padding: 0 1.4rem;
+}}
+
+/* Krishna floating avatar chip above chat */
+.krishna-chip {{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.2rem;
+    background: var(--surface);
+    border: 1px solid var(--border-gold);
+    border-radius: var(--r);
+    margin: 1.4rem 1.4rem 0.8rem;
+    box-shadow: 0 0 30px rgba(212,175,55,0.06);
+}}
+.chip-avatar {{
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 2px solid var(--saffron);
+    box-shadow: 0 0 0 4px var(--saffron-dim);
+    flex-shrink: 0;
+    background: linear-gradient(135deg, #FF6B35, #D4AF37);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.4rem;
+}}
+.chip-info {{ flex: 1; }}
+.chip-name {{
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--cream);
+}}
+.chip-status {{
+    font-size: 0.73rem;
+    color: var(--online);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.15rem;
+}}
+.chip-shloka {{
+    font-family: 'Crimson Pro', serif;
+    font-size: 0.8rem;
+    color: rgba(212,175,55,0.7);
+    font-style: italic;
+    text-align: right;
+    line-height: 1.5;
+    max-width: 200px;
+}}
+
+/* ══════════════════════════════════════
+   CHAT INPUT
+══════════════════════════════════════ */
+.stChatInput > div {{
+    background: var(--surface) !important;
+    border: 1px solid rgba(255,255,255,0.07) !important;
+    border-radius: 14px !important;
+    margin: 0 1.8rem !important;
+    transition: border-color .2s, box-shadow .2s !important;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2) !important;
+}}
+.stChatInput > div:focus-within {{
+    border-color: var(--saffron) !important;
+    box-shadow: 0 0 0 3px var(--saffron-dim), 0 4px 24px rgba(0,0,0,0.2) !important;
+}}
+.stChatInput textarea {{
+    background: transparent !important;
+    color: var(--cream2) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.95rem !important;
+}}
+.stChatInput textarea::placeholder {{
+    color: var(--muted) !important;
+    font-style: italic;
+}}
+
+/* ══════════════════════════════════════
+   CHAT BUBBLES
+══════════════════════════════════════ */
+[data-testid="stChatMessage"] {{
+    border-radius: var(--r) !important;
+    margin: 0.5rem 1.8rem !important;
+    border: 1px solid var(--border) !important;
+    animation: fadeUp .3s ease both;
+    padding: 1rem 1.2rem !important;
+}}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {{
+    background: linear-gradient(135deg, #111124 0%, #0e0e1e 100%) !important;
+    border-color: rgba(255,255,255,0.05) !important;
+}}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {{
+    background: linear-gradient(135deg, #0c0c18 0%, #0a0a14 100%) !important;
+    border-color: rgba(201,168,76,0.16) !important;
+    box-shadow:
+        0 0 0 1px rgba(201,168,76,0.06),
+        0 8px 32px rgba(0,0,0,0.25) !important;
+}}
+[data-testid="stChatMessage"] p {{
+    font-family: 'Crimson Pro', serif !important;
+    font-size: 1.08rem !important;
+    line-height: 1.82 !important;
+    color: var(--cream) !important;
+}}
+
+/* ══════════════════════════════════════
+   FLOATING ACTION BUTTONS
+══════════════════════════════════════ */
+.fab-row {{
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.6rem 1.4rem 0;
+}}
+.fab {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all .2s ease;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+}}
+.fab:hover {{
+    border-color: var(--saffron);
+    color: var(--saffron);
+}}
+
+/* Download button */
+.stDownloadButton > button {{
+    background: var(--surface2) !important;
+    color: var(--muted2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 9px !important;
+    font-size: 0.78rem !important;
+    font-weight: 500 !important;
+    padding: 0.45rem 0.9rem !important;
+    box-shadow: none !important;
+    transition: all .2s ease !important;
+}}
+.stDownloadButton > button:hover {{
+    border-color: var(--saffron) !important;
+    color: var(--saffron-l) !important;
+    transform: none !important;
+}}
+
+/* ══════════════════════════════════════
+   FOOTER
+══════════════════════════════════════ */
+.gita-footer {{
+    text-align: center;
+    padding: 2.5rem 1.8rem 2rem;
+    font-size: 0.76rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    margin-top: 2.5rem;
+    line-height: 2.1;
+    letter-spacing: 0.02em;
+}}
+
+/* ══════════════════════════════════════
+   ANIMATIONS
+══════════════════════════════════════ */
+@keyframes fadeUp {{
+    from {{ opacity:0; transform:translateY(10px); }}
+    to   {{ opacity:1; transform:translateY(0); }}
+}}
+@keyframes heroFadeIn {{
+    from {{ opacity:0; transform:translateY(16px); }}
+    to   {{ opacity:1; transform:translateY(0); }}
+}}
+@keyframes blink {{
+    0%,100% {{ opacity:1; }}
+    50%      {{ opacity:0.3; }}
+}}
+@keyframes auraPulse {{
+    0%,100% {{ opacity:.65; transform:translateX(-50%) scale(1); }}
+    50%      {{ opacity:1;   transform:translateX(-50%) scale(1.15); }}
+}}
+@keyframes floatUp {{
+    0%   {{ transform:translateY(0) scale(1);   opacity:.8; }}
+    100% {{ transform:translateY(-120px) scale(0); opacity:0; }}
+}}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+set_css(krishna_b64)
+
+# --------------------------------------------------
+# NAV BAR
+# --------------------------------------------------
+st.markdown("""
+<div class="topnav">
+    <div class="nav-logo">🕉️ &nbsp;<em>GitaGPT</em></div>
+    <div class="nav-links">
+        <span>Chat</span>
+        <span>Library</span>
+        <span>About</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# --------------------------------------------------
+# API KEY CHECK
+# --------------------------------------------------
+if not GROQ_API_KEY:
+    st.markdown("""
+    <div style="padding:4rem 2rem;text-align:center;">
+        <div style="font-size:2rem;margin-bottom:1rem;">🔑</div>
+        <div style="font-size:1.1rem;font-weight:600;margin-bottom:0.5rem;">
+            API Key Missing
+        </div>
+        <div style="font-size:0.88rem;color:rgba(245,240,232,0.45);">
+            Add <code>GROQ_API_KEY</code> to your <code>.env</code> file
+            or Streamlit Cloud → Secrets.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+# --------------------------------------------------
+# LLM
+# --------------------------------------------------
+llm = ChatGroq(model="llama-3.1-8b-instant", groq_api_key=GROQ_API_KEY)
+
+# --------------------------------------------------
+# VECTORSTORE
+# --------------------------------------------------
+@st.cache_resource
+def create_vectorstore():
+    loader   = PyPDFLoader("gita_book.pdf")
+    pages    = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs     = splitter.split_documents(pages)
+    emb      = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return Chroma.from_documents(docs, embedding=emb, persist_directory="./gita_chroma")
+
+vectorstore = create_vectorstore()
+qa_chain    = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever(search_kwargs={"k": 4})
 )
 
-# ------------------- Load and Embed PDF -------------------
-@st.cache_resource
-def create_vectorstore(pdf_path):
-    # Ensure an asyncio event loop is available for GoogleGenerativeAIEmbeddings
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
+if "messages"     not in st.session_state: st.session_state.messages     = []
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
 
-    if not os.path.exists(pdf_path):
-        st.error(f"Error: PDF file not found at '{pdf_path}'. Please ensure '{pdf_path}' is in the same directory as your app.")
-        return None # Indicate failure
-    
-    try:
-        loader = PyPDFLoader(pdf_path)
-        pages = loader.load()
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        docs = splitter.split_documents(pages)
+# --------------------------------------------------
+# INTRO / NAME GATE
+# --------------------------------------------------
+if "name" not in st.session_state:
 
-        if not docs:
-            st.error("Text splitting failed. No chunks were created from the PDF. The PDF might be empty or unreadable.")
-            return None
+    # ── HERO: Krishna image fades into the headline ──
+    st.markdown("""
+    <div class="krishna-visual">
+        <div class="hero-text">
+            <span class="hero-eyebrow">Ancient Wisdom &nbsp;•&nbsp; Modern Guidance</span>
+            <div class="hero-title">
+                Ask <span class="g">Lord Krishna</span><br>Anything
+            </div>
+            <div class="hero-sub">
+                Personalized guidance inspired by the Bhagavad Gita<br>for life's deepest questions.
+            </div>
+            <div class="status-badge">
+                <div class="dot-live"></div>
+                Lord Krishna AI &nbsp;·&nbsp; Always Online
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
-            google_api_key=GOOGLE_API_KEY,
-        )
+    # Stats
+    st.markdown("""
+    <div class="stats-row">
+        <div class="stat"><span class="stat-v">700+</span><span class="stat-l">Shlokas Indexed</span></div>
+        <div class="stat"><span class="stat-v">100%</span><span class="stat-l">Private & Secure</span></div>
+        <div class="stat"><span class="stat-v">RAG</span><span class="stat-l">AI Powered</span></div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        # Persist directory for faster loading on subsequent runs
-        persist_directory = "./gita_chroma"
-        if os.path.exists(persist_directory) and os.listdir(persist_directory):
-            st.info("Loading existing spiritual wisdom repository (vector store)...")
-            vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        else:
-            st.info("Creating spiritual wisdom repository (vector store) from Gita...")
-            vectorstore = Chroma.from_documents(
-                docs, embedding=embeddings, persist_directory=persist_directory
-            )
-            st.success("Spiritual wisdom repository created successfully!")
-        return vectorstore
-    except Exception as e:
-        # Catch specific sqlite3 error for a more user-friendly message
-        if "sqlite3" in str(e).lower() and "unsupported version" in str(e).lower():
-            st.error("🚨 Critical Error: Your system has an unsupported version of sqlite3 for ChromaDB. "
-                     "This issue is typically resolved by ensuring 'pysqlite3-binary' is in your requirements.txt "
-                     "and the module swap code is at the very top of your app.py. "
-                     "If you are deploying on Streamlit Cloud, these steps are crucial.")
-        else:
-            st.error(f"Failed to load or process PDF for embeddings: {e}")
-        return None # Indicate failure
+    # Form
+    st.markdown("""
+    <div class="form-shell">
+        <div class="form-title">Begin your session</div>
+        <div class="form-sub">No account required. Your conversations are private and never stored.</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-# Load background image once and pass its base64 to CSS
-background_b64 = ""
-try:
-    with open("krishna_ji.jpeg", "rb") as img: # Ensure this is the correct filename
-        background_b64 = base64.b64encode(img.read()).decode()
-    set_custom_css(background_b64) # Pass the base64 string here
-except FileNotFoundError:
-    st.error("Background image 'krishna_ji.jpeg' not found. Please ensure it's in the same directory.")
-    st.stop()
-except Exception as e:
-    st.error(f"Error loading background image: {e}")
-    st.stop()
-
-# Initialize vectorstore and QA chain
-qa_chain = None
-vectorstore_initialized = False
-try:
-    vectorstore = create_vectorstore("gita_book.pdf")
-    if vectorstore:
-        qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever(), return_source_documents=False)
-        vectorstore_initialized = True
-    else:
-        st.warning("Could not initialize the spiritual wisdom repository (vector store). I will answer as Kanha based on my general knowledge.")
-except Exception as e:
-    st.warning(f"An error occurred during vector store initialization: {e}. I will answer as Kanha based on my general knowledge.")
-
-
-# ------------------- Intro Screen (Modal-like) -------------------
-if "name" not in st.session_state or not st.session_state.name:
-    st.session_state.name = ""
-    st.session_state.age = ""
-
-    # This div contains the intro form and applies the new styling
-    st.markdown("<div class='intro-container'>", unsafe_allow_html=True)
-    st.subheader("🙏 Welcome, Seeker! Let's embark on this spiritual journey.")
-    st.markdown("---") # Visual separator
-    
-    with st.form("intro_form", clear_on_submit=True):
-        name = st.text_input("What is your sacred name?", max_chars=50, placeholder="Your Devotional Name...")
-        age = st.text_input("How many springs have you witnessed?", max_chars=3, placeholder="Your Age in Years...")
-        
-        # Use a more thematic button text
-        submitted = st.form_submit_button("🕊️ Enter the Realm of Gita's Wisdom")
-
-        if submitted:
-            if name.strip() and age.strip().isdigit():
+    with st.form("intro"):
+        name   = st.text_input("Your Name", placeholder="e.g. Arjuna")
+        age    = st.number_input("Your Age", min_value=1, max_value=120, value=25)
+        submit = st.form_submit_button("🕉️  Begin Conversation")
+        if submit:
+            if name.strip():
                 st.session_state.name = name.strip()
-                st.session_state.age = int(age.strip())
-                st.rerun() # Rerun to switch to chat interface
+                st.session_state.age  = age
+                st.rerun()
             else:
-                st.warning("Please gracefully provide a valid name and numeric age to proceed on this path.")
-    st.markdown("</div>", unsafe_allow_html=True)
+                st.warning("Please enter your name to continue.")
 
-# ------------------- Chat Interface -------------------
+# --------------------------------------------------
+# MAIN CHAT
+# --------------------------------------------------
 else:
-    # Main content wrapper (replaces the 'glass-effect' for the whole chat area)
-    st.markdown("<div class='main-content-container'>", unsafe_allow_html=True)
-    st.markdown(f"### 🌸 Namaste, **{st.session_state.name}** (Age: {st.session_state.age})")
-    st.markdown("*Seek guidance, and let Lord Krishna illuminate your path through the timeless wisdom of the Bhagavad Gita.*")
+    name = st.session_state.name
+    age  = st.session_state.age
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-        st.session_state.chat_history = []
+    # ── Compact Krishna visual strip (chat page) ──
+    # Shows the image cropped to face region with glow overlay
+    if krishna_b64:
+        st.markdown(f"""
+        <div style="
+            width:100%;
+            height:260px;
+            position:relative;
+            overflow:hidden;
+        ">
+            <!-- photo -->
+            <div style="
+                position:absolute; inset:0;
+                background: url('data:image/jpeg;base64,{krishna_b64}') center 15% / cover no-repeat;
+                mask-image: linear-gradient(to bottom,
+                    transparent 0%, rgba(0,0,0,0.08) 8%,
+                    rgba(0,0,0,0.85) 58%, black 78%);
+                -webkit-mask-image: linear-gradient(to bottom,
+                    transparent 0%, rgba(0,0,0,0.08) 8%,
+                    rgba(0,0,0,0.85) 58%, black 78%);
+            "></div>
+            <!-- saffron aura glow -->
+            <div style="
+                position:absolute; top:0; left:50%; transform:translateX(-50%);
+                width:280px; height:220px; border-radius:50%;
+                background: radial-gradient(circle,
+                    rgba(255,140,50,0.2) 0%,
+                    rgba(212,175,55,0.1) 45%,
+                    transparent 70%);
+                mix-blend-mode:screen;
+                animation: auraPulse 4s ease-in-out infinite;
+                pointer-events:none;
+            "></div>
+            <!-- text overlay -->
+            <div style="
+                position:absolute; bottom:0; left:0; right:0;
+                padding:1rem 1.6rem 1.2rem;
+                display:flex; align-items:flex-end;
+                justify-content:space-between;
+            ">
+                <div>
+                    <div style="font-size:0.65rem;font-weight:600;
+                                letter-spacing:0.2em;text-transform:uppercase;
+                                color:#FF6B35;margin-bottom:0.3rem;">
+                        श्रीमद्भगवद्गीता
+                    </div>
+                    <div style="font-size:1.4rem;font-weight:700;
+                                letter-spacing:-0.02em;color:#F5F0E8;">
+                        Lord Krishna AI
+                    </div>
+                </div>
+                <div style="
+                    display:flex; align-items:center; gap:0.45rem;
+                    background:rgba(10,10,18,0.7);
+                    border:1px solid rgba(212,175,55,0.25);
+                    border-radius:20px; padding:0.35rem 0.9rem;
+                    font-size:0.72rem; color:#22C55E; font-weight:500;
+                    backdrop-filter:blur(8px);
+                ">
+                    <div style="width:6px;height:6px;border-radius:50%;
+                                background:#22C55E;box-shadow:0 0 6px #22C55E;
+                                animation:blink 2s ease infinite;"></div>
+                    Always online
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Display chat messages from history on app rerun
-    chat_container = st.container(height=500, border=False) # border=False because we apply custom styling
-    
-    with chat_container:
-        for message in st.session_state.messages:
-            if message["role"] == "user":
-                with st.chat_message("user", avatar="🧍‍♂️"): # Using emoji as avatar
-                    st.write(message["content"])
-            else:
-                with st.chat_message("assistant", avatar="🧘"): # Using emoji as avatar
-                    st.write(message["content"])
+    # ── Action row (clear + download) ──
+    col1, col2, col3 = st.columns([4, 1, 1])
+    with col1:
+        st.markdown(f"""
+        <div style="padding:0.6rem 1.4rem 0;font-size:0.85rem;color:rgba(245,240,232,0.5);">
+            🙏 &nbsp;Namaste, <strong style="color:#F5F0E8;">{name}</strong>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        if st.button("🔄 Clear"):
+            st.session_state.messages     = []
+            st.session_state.chat_history = []
+            st.rerun()
+    with col3:
+        hist = st.session_state.get("chat_history", [])
+        if hist:
+            def make_pdf(history, seeker):
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("helvetica", "B", 18)
+                pdf.set_text_color(180, 100, 0)
+                pdf.cell(0, 12, "GitaGPT — Dialogue Transcript",
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+                pdf.set_font("helvetica", "", 10)
+                pdf.set_text_color(80, 40, 0)
+                pdf.cell(0, 8, f"Seeker: {seeker}",
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+                pdf.ln(4)
+                for i, (q, a) in enumerate(history, 1):
+                    pdf.set_font("helvetica", "B", 10)
+                    pdf.set_text_color(0, 77, 97)
+                    pdf.multi_cell(0, 7,
+                        f"[{i}] You: {q.encode('latin-1','replace').decode('latin-1')}",
+                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                    pdf.set_font("helvetica", "", 10)
+                    pdf.set_text_color(59, 0, 0)
+                    clean = a.replace("🪷 **Lord Krishna speaks —**","").strip()
+                    pdf.multi_cell(0, 7,
+                        f"Krishna: {clean.encode('latin-1','replace').decode('latin-1')}",
+                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                    pdf.ln(3)
+                return bytes(pdf.output())
 
-    user_input = st.chat_input("🙏 Offer your question to Krishna...")
+            st.download_button(
+                "📄 Save",
+                data=make_pdf(hist, name),
+                file_name=f"GitaGPT_{name}.pdf",
+                mime="application/pdf"
+            )
+
+    # ── Chat history ──
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ── Chat input ──
+    user_input = st.chat_input("Type a message…")
 
     if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
         st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Process AI response
-        with st.spinner("Krishna is contemplating your profound question..."):
-            if vectorstore_initialized and qa_chain:
-                # Original prompt with added persona instruction
-                prompt_with_persona = (
-                    f"You are Lord Krishna from the Bhagavad Gita, addressing {st.session_state.name}, a seeker aged {st.session_state.age}. "
-                    "Your responses should be imbued with the wisdom, compassion, and authority of the Gita. "
-                    "Answer the following question as if I am Arjuna seeking guidance, always drawing upon the principles and teachings of the Bhagavad Gita. "
-                    "Do not break character. Do not mention that you are an AI or a language model. "
-                    f"Here is the seeker's query: {user_input}"
-                )
-                # Correct way to invoke a RetrievalQA chain
-                response_dict = qa_chain.invoke({"query": prompt_with_persona})
-                response = response_dict.get("result", "My dear devotee, I cannot find a direct answer in the scriptures for this. Please ask another question.")
-            else:
-                # Fallback to direct LLM if vector store not available
-                fallback_prompt = (
-                    f"You are Lord Krishna, addressing {st.session_state.name}, a seeker aged {st.session_state.age}. "
-                    "Though my sacred texts are momentarily beyond reach, I shall share wisdom based on the eternal truths I embody. "
-                    "Answer the following question as if I am Arjuna seeking guidance. "
-                    "Do not break character. Do not mention that you are an AI or a language model. "
-                    f"Here is the seeker's query: {user_input}"
-                )
-                response = llm.invoke(fallback_prompt).content
-            
-            # Append assistant's response to messages for immediate display after processing
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.chat_history.append((user_input, response))
-            
-            # Re-run the app to update the chat display with both new messages
-            st.rerun() 
 
-    st.markdown("</div>", unsafe_allow_html=True) # Close the main-content-container
+        with st.chat_message("assistant"):
+            with st.spinner("Krishna is reflecting…"):
+                try:
+                    prompt = f"""You are Lord Krishna speaking to {name} (age {age}).
+Use wisdom from the Bhagavad Gita. Structure your response:
+1. Relevant Sanskrit shloka (chapter/verse)
+2. English translation
+3. Practical spiritual guidance
 
-    # ------------------- Sidebar (Applying glass-effect) -------------------
-    with st.sidebar:
-        st.header("🗂️ Sacred Options")
-        st.markdown("<div class='sidebar-options-container'>", unsafe_allow_html=True) # New wrapper for sidebar options
-        if st.button("🔄 Clear Our Dialogue"):
-            st.session_state.messages = []
-            st.session_state.chat_history = []
-            st.success("Your dialogue with Krishna has been cleared. A fresh start awaits!")
-            st.rerun() 
-        
-        def save_transcript(chat):
-            pdf = FPDF()
-            # --- FIX: Add page before drawing anything ---
-            pdf.add_page() 
+Keep the tone calm, wise, and compassionate. Never say you are an AI.
+Question: {user_input}"""
+                    response = qa_chain.run(prompt)
+                    final    = f"🪷 **Lord Krishna speaks —**\n\n{response}"
+                except Exception as e:
+                    final = f"*The divine connection wavered. Please try again.*\n\n`{e}`"
 
-            # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-            pdf.set_font("helvetica", size=12) 
-            pdf.set_text_color(255, 215, 0) # Gold text for PDF for elegance
-            
-            # Addressing DeprecationWarning: The parameter "txt" has been renamed to "text"
-            # Addressing DeprecationWarning: The parameter "ln" is deprecated.
-            pdf.cell(w=0, h=15, text=f"Bhagavad Gita GPT - Conversation with {st.session_state.name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
-            pdf.ln(10) 
+                st.markdown(final)
 
-            for q, a in chat:
-                # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-                pdf.set_font("helvetica", "B", 10) 
-                pdf.multi_cell(w=0, h=8, text=f"You: {q}") # Use text= instead of txt=
-                pdf.ln(2) 
+        st.session_state.messages.append({"role": "assistant", "content": final})
+        st.session_state.chat_history.append((user_input, final))
 
-                # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-                pdf.set_font("helvetica", "", 10) 
-                pdf.set_text_color(173, 216, 230) # Light blue for Krishna's words in PDF
-                pdf.multi_cell(w=0, h=8, text=f"Krishna: {a}") # Use text= instead of txt=
-                pdf.set_text_color(255, 215, 0) # Reset to gold
-                pdf.ln(8) 
-            
-            pdf.ln(10)
-            # Addressing DeprecationWarning: Substituting font arial by core font helvetica
-            pdf.set_font("helvetica", "I", 8) 
-            pdf.set_text_color(150, 150, 150) 
-            # Addressing DeprecationWarning: The parameter "ln" is deprecated.
-            pdf.cell(w=0, h=10, text="Generated by Gita GPT, your spiritual companion.", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-            
-            # --- THE CORRECT FIX FOR 'bytearray' object has no attribute 'encode' ---
-            # fpdf2.output() by default returns a bytearray, which needs to be converted to bytes for Streamlit.
-            # The 'dest' parameter is also deprecated, so it's removed.
-            return bytes(pdf.output())
-
-
-        if st.button("📄 Preserve This Wisdom (Download Transcript)"):
-            if st.session_state.chat_history:
-                pdf_output = save_transcript(st.session_state.chat_history)
-                st.download_button(
-                    label="⬇️ Download PDF of Our Dialogue",
-                    data=pdf_output,
-                    file_name=f"gita_chat_{st.session_state.name.replace(' ', '_')}.pdf",
-                    mime="application/pdf",
-                    help="Download your conversation as a PDF file to cherish the wisdom."
-                )
-            else:
-                st.warning("There is no divine conversation to preserve yet.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
-    # ------------------- Footer -------------------
-    st.markdown('<div class="footer">🌼 May Krishna’s wisdom ever guide your path. <br>Created with ❤️ and devotion by <strong>Anish Kumar</strong></div>', unsafe_allow_html=True)
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
+st.markdown("""
+<div class="gita-footer">
+    🕉️ &nbsp; हरे कृष्ण हरे कृष्ण &nbsp; 🕉️<br>
+    <strong>GitaGPT</strong> &nbsp;·&nbsp; Created by Saurya Raj
+    &nbsp;·&nbsp; Powered by Groq + LangChain
+</div>
+""", unsafe_allow_html=True)
